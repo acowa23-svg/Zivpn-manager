@@ -1,328 +1,167 @@
 #!/bin/bash
 
-# ============================================================
-#                 ZiVPN MANAGER V2
-# ============================================================
-
 set -u
 set -o pipefail
-
-# ============================================================
-# PATHS
-# ============================================================
 
 DB="/root/zivpn_users.db"
 CONFIG="/etc/zivpn/config.json"
 
-# ============================================================
-# COLORS
-# ============================================================
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 WHITE='\033[1;37m'
-MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-# ============================================================
-# ROOT CHECK
-# ============================================================
+die() {
+    echo -e "${RED}$1${NC}"
+    exit 1
+}
 
 if [ "$EUID" -ne 0 ]; then
-    echo
-    echo -e "${RED}ERROR: ZiVPN Manager must be run as root.${NC}"
-    echo
-    echo "Run:"
-    echo "sudo zi"
-    echo
-    exit 1
+    die "ERROR: Run this manager as root."
 fi
 
-# ============================================================
-# DEPENDENCY CHECK
-# ============================================================
-
-check_dependencies() {
-
-    local missing=0
-
-    for command in curl jq sqlite3 systemctl; do
-
-        if ! command -v "$command" >/dev/null 2>&1; then
-
-            echo -e "${RED}Missing required command: $command${NC}"
-
-            missing=1
-
-        fi
-
-    done
-
-    if [ "$missing" -eq 1 ]; then
-
-        echo
-        echo "Please run the installer again:"
-        echo
-        echo "sudo bash install.sh"
-        echo
-
-        exit 1
-
+for cmd in curl jq sqlite3 systemctl sed date; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        die "Missing required command: $cmd"
     fi
-}
-
-check_dependencies
-
-# ============================================================
-# DATABASE CHECK
-# ============================================================
+done
 
 if [ ! -f "$DB" ]; then
-
-    echo
-    echo -e "${RED}Database not found.${NC}"
-    echo
-    echo "Run the installer first."
-    echo
-
-    exit 1
+    die "Database not found: $DB"
 fi
-
-# ============================================================
-# CONFIG CHECK
-# ============================================================
 
 if [ ! -f "$CONFIG" ]; then
-
-    echo
-    echo -e "${RED}ZiVPN configuration not found:${NC}"
-    echo "$CONFIG"
-    echo
-
-    exit 1
+    die "ZiVPN configuration not found: $CONFIG"
 fi
 
-# ============================================================
-# PUBLIC IP
-# ============================================================
-
 get_public_ip() {
+    local ip
 
-    local ip=""
+    ip=$(curl -4 -fsS --max-time 5 \
+        https://api.ipify.org 2>/dev/null || true)
 
-    ip=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
-
-    if [ -z "$ip" ]; then
-        ip="Unavailable"
+    if [ -n "$ip" ]; then
+        printf '%s\n' "$ip"
+    else
+        printf '%s\n' "Unavailable"
     fi
-
-    echo "$ip"
 }
 
-# ============================================================
-# HEADER
-# ============================================================
-
 header() {
+    clear 2>/dev/null || true
 
-    clear
+    local ip
+    ip=$(get_public_ip)
 
-    local public_ip
-
-    public_ip=$(get_public_ip)
-
-    echo -e "${CYAN}"
-    echo "============================================================"
-    echo "                    ZiVPN MANAGER V2"
-    echo "============================================================"
-    echo -e "${NC}"
-
-    echo -e "${WHITE}Server IP : ${GREEN}${public_ip}${NC}"
+    echo -e "${CYAN}============================================================${NC}"
+    echo -e "${CYAN}                    ZiVPN MANAGER V2${NC}"
+    echo -e "${CYAN}============================================================${NC}"
+    echo -e "${WHITE}Server IP : ${GREEN}$ip${NC}"
     echo -e "${WHITE}Server    : ${GREEN}$(hostname)${NC}"
     echo -e "${WHITE}Date      : ${GREEN}$(date '+%Y-%m-%d')${NC}"
     echo -e "${WHITE}Time      : ${GREEN}$(date '+%H:%M:%S')${NC}"
-
-    echo
     echo "------------------------------------------------------------"
     echo
 }
 
-# ============================================================
-# PAUSE
-# ============================================================
-
 pause_screen() {
-
     echo
     read -r -p "Press ENTER to continue..."
 }
 
-# ============================================================
-# SQL ESCAPE
-# ============================================================
-
-escape_sql() {
-
+sql_escape() {
     printf "%s" "$1" | sed "s/'/''/g"
 }
 
-# ============================================================
-# USER EXISTS
-# ============================================================
-
 user_exists() {
-
-    local username="$1"
-    local safe_username
-
-    safe_username=$(escape_sql "$username")
+    local username
+    username=$(sql_escape "$1")
 
     sqlite3 "$DB" \
-        "SELECT COUNT(*) FROM users WHERE username='$safe_username';"
+        "SELECT COUNT(*) FROM users WHERE username='$username';"
 }
-
-# ============================================================
-# GET PASSWORD
-# ============================================================
 
 get_password() {
-
-    local username="$1"
-    local safe_username
-
-    safe_username=$(escape_sql "$username")
+    local username
+    username=$(sql_escape "$1")
 
     sqlite3 "$DB" \
-        "SELECT password FROM users WHERE username='$safe_username';"
+        "SELECT password FROM users WHERE username='$username';"
 }
-
-# ============================================================
-# GET EXPIRY
-# ============================================================
 
 get_expiry() {
-
-    local username="$1"
-    local safe_username
-
-    safe_username=$(escape_sql "$username")
+    local username
+    username=$(sql_escape "$1")
 
     sqlite3 "$DB" \
-        "SELECT expiry FROM users WHERE username='$safe_username';"
+        "SELECT expiry FROM users WHERE username='$username';"
 }
 
-# ============================================================
-# BACKUP CONFIG
-# ============================================================
+restart_zivpn() {
 
-backup_config() {
-
-    if [ -f "$CONFIG" ]; then
-
-        cp "$CONFIG" "${CONFIG}.backup"
-
-        chmod 600 "${CONFIG}.backup"
-
+    if systemctl restart zivpn 2>/dev/null; then
+        echo -e "${GREEN}ZiVPN restarted successfully.${NC}"
+        return 0
     fi
-}
 
-# ============================================================
-# ADD PASSWORD TO ZIVPN
-# ============================================================
+    echo -e "${RED}Unable to restart ZiVPN.${NC}"
+    echo
+    echo "Run:"
+    echo "systemctl status zivpn"
+
+    return 1
+}
 
 add_password() {
 
     local password="$1"
-
-    if [ ! -f "$CONFIG" ]; then
-
-        echo -e "${RED}ZiVPN configuration not found.${NC}"
-
-        return 1
-    fi
-
-    if ! jq empty "$CONFIG" >/dev/null 2>&1; then
-
-        echo -e "${RED}ZiVPN configuration contains invalid JSON.${NC}"
-
-        return 1
-    fi
-
-    backup_config
-
     local temp_config
 
-    temp_config=$(mktemp)
+    if ! jq empty "$CONFIG" >/dev/null 2>&1; then
+        return 1
+    fi
 
-    if ! jq --arg pass "$password" \
-        '
-        if .auth == null then
-            .auth = {}
-        else
-            .
-        end
-        |
-        if .auth.config == null then
-            .auth.config = []
-        else
-            .
-        end
-        |
+    cp -f "$CONFIG" "${CONFIG}.backup" || return 1
+
+    temp_config=$(mktemp) || return 1
+
+    if ! jq --arg pass "$password" '
+        .auth = (.auth // {}) |
+        .auth.config = (.auth.config // []) |
         .auth.config = ((.auth.config + [$pass]) | unique)
-        ' \
-        "$CONFIG" > "$temp_config"
-    then
+    ' "$CONFIG" > "$temp_config"; then
 
         rm -f "$temp_config"
-
-        echo -e "${RED}Failed to modify ZiVPN configuration.${NC}"
-
         return 1
     fi
 
     if ! jq empty "$temp_config" >/dev/null 2>&1; then
-
         rm -f "$temp_config"
-
-        echo -e "${RED}Generated configuration is invalid.${NC}"
-
         return 1
     fi
 
     mv "$temp_config" "$CONFIG"
-
     chmod 600 "$CONFIG"
 
     return 0
 }
 
-# ============================================================
-# REMOVE PASSWORD FROM ZIVPN
-# ============================================================
-
 remove_password() {
 
     local password="$1"
-
-    if [ ! -f "$CONFIG" ]; then
-        return 1
-    fi
+    local temp_config
 
     if ! jq empty "$CONFIG" >/dev/null 2>&1; then
         return 1
     fi
 
-    backup_config
+    cp -f "$CONFIG" "${CONFIG}.backup" || return 1
 
-    local temp_config
+    temp_config=$(mktemp) || return 1
 
-    temp_config=$(mktemp)
-
-    if ! jq --arg pass "$password" \
-        '
+    if ! jq --arg pass "$password" '
         if .auth == null then
             .
         elif .auth.config == null then
@@ -330,53 +169,17 @@ remove_password() {
         else
             .auth.config = ((.auth.config // []) - [$pass])
         end
-        ' \
-        "$CONFIG" > "$temp_config"
-    then
+    ' "$CONFIG" > "$temp_config"; then
 
         rm -f "$temp_config"
-
-        echo -e "${RED}Failed to modify ZiVPN configuration.${NC}"
-
         return 1
     fi
 
     mv "$temp_config" "$CONFIG"
-
     chmod 600 "$CONFIG"
 
     return 0
 }
-
-# ============================================================
-# RESTART ZIVPN
-# ============================================================
-
-restart_zivpn() {
-
-    echo
-
-    if systemctl restart zivpn 2>/dev/null; then
-
-        echo -e "${GREEN}ZiVPN restarted successfully.${NC}"
-
-        return 0
-
-    fi
-
-    echo -e "${RED}Unable to restart ZiVPN.${NC}"
-    echo
-    echo "Check the service with:"
-    echo
-    echo "systemctl status zivpn"
-    echo
-
-    return 1
-}
-
-# ============================================================
-# ADD USER
-# ============================================================
 
 add_user() {
 
@@ -384,53 +187,45 @@ add_user() {
 
     echo -e "${GREEN}ADD ZIVPN USER${NC}"
     echo "------------------------------------------------------------"
-    echo
 
-    local public_ip
+    local ip
     local username
     local password
     local option
     local value
+    local multiplier
     local expiry
     local safe_username
     local safe_password
 
-    public_ip=$(get_public_ip)
+    ip=$(get_public_ip)
 
+    echo
     read -r -p "Username: " username
 
     if [ -z "$username" ]; then
-
         echo -e "${RED}Username cannot be empty.${NC}"
-
         pause_screen
         return
     fi
 
     if [[ "$username" == *"|"* ]]; then
-
         echo -e "${RED}Username cannot contain |${NC}"
-
         pause_screen
         return
     fi
 
     if [ "$(user_exists "$username")" -gt 0 ]; then
-
         echo -e "${RED}Username already exists.${NC}"
-
         pause_screen
         return
     fi
 
     read -r -s -p "Password: " password
-
     echo
 
     if [ -z "$password" ]; then
-
         echo -e "${RED}Password cannot be empty.${NC}"
-
         pause_screen
         return
     fi
@@ -448,74 +243,45 @@ add_user() {
     case "$option" in
 
         1)
-
             read -r -p "Number of hours: " value
-
-            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
-
-                echo -e "${RED}Invalid duration.${NC}"
-
-                pause_screen
-                return
-            fi
-
-            expiry=$(( $(date +%s) + value * 3600 ))
-
+            multiplier=3600
             ;;
 
         2)
-
             read -r -p "Number of days: " value
-
-            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
-
-                echo -e "${RED}Invalid duration.${NC}"
-
-                pause_screen
-                return
-            fi
-
-            expiry=$(( $(date +%s) + value * 86400 ))
-
+            multiplier=86400
             ;;
 
         3)
-
             read -r -p "Number of months: " value
-
-            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
-
-                echo -e "${RED}Invalid duration.${NC}"
-
-                pause_screen
-                return
-            fi
-
-            expiry=$(( $(date +%s) + value * 2592000 ))
-
+            multiplier=2592000
             ;;
 
         *)
-
             echo -e "${RED}Invalid selection.${NC}"
-
             pause_screen
             return
             ;;
 
     esac
 
-    safe_username=$(escape_sql "$username")
-    safe_password=$(escape_sql "$password")
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
+        echo -e "${RED}Invalid duration.${NC}"
+        pause_screen
+        return
+    fi
 
-    if ! sqlite3 "$DB" <<SQL
-INSERT INTO users (username, password, expiry)
-VALUES ('$safe_username', '$safe_password', '$expiry');
-SQL
+    expiry=$(( $(date +%s) + value * multiplier ))
+
+    safe_username=$(sql_escape "$username")
+    safe_password=$(sql_escape "$password")
+
+    if ! sqlite3 "$DB" \
+        "INSERT INTO users(username,password,expiry)
+         VALUES('$safe_username','$safe_password','$expiry');"
     then
 
         echo -e "${RED}Failed to create database user.${NC}"
-
         pause_screen
         return
     fi
@@ -526,42 +292,28 @@ SQL
             "DELETE FROM users WHERE username='$safe_username';"
 
         echo -e "${RED}Failed to add password to ZiVPN.${NC}"
-
         pause_screen
         return
     fi
 
-    if ! restart_zivpn >/dev/null 2>&1; then
-
-        echo
-        echo -e "${YELLOW}Warning: user was created, but ZiVPN could not be restarted.${NC}"
-        echo
-    fi
+    restart_zivpn >/dev/null 2>&1 || true
 
     echo
-    echo -e "${GREEN}"
-    echo "============================================================"
-    echo "                    USER CREATED"
-    echo "============================================================"
-    echo -e "${NC}"
-
-    echo -e "IP Address : ${GREEN}${public_ip}${NC}"
-    echo -e "Username   : ${GREEN}${username}${NC}"
-    echo -e "Password   : ${GREEN}${password}${NC}"
-    echo -e "Expires    : ${GREEN}$(date -d "@$expiry" '+%Y-%m-%d %H:%M:%S')${NC}"
-
+    echo -e "${GREEN}============================================================${NC}"
+    echo -e "${GREEN}                    USER CREATED${NC}"
+    echo -e "${GREEN}============================================================${NC}"
+    echo
+    echo "IP Address : $ip"
+    echo "Username   : $username"
+    echo "Password   : $password"
+    echo "Expires    : $(date -d "@$expiry" '+%Y-%m-%d %H:%M:%S')"
     echo
     echo "------------------------------------------------------------"
     echo
     echo -e "${GREEN}User successfully created.${NC}"
-    echo
 
     pause_screen
 }
-
-# ============================================================
-# DELETE USER
-# ============================================================
 
 delete_user() {
 
@@ -569,26 +321,16 @@ delete_user() {
 
     echo -e "${RED}DELETE USER${NC}"
     echo "------------------------------------------------------------"
-    echo
 
     local username
     local password
     local safe_username
 
+    echo
     read -r -p "Username: " username
 
-    if [ -z "$username" ]; then
-
-        echo -e "${RED}Username cannot be empty.${NC}"
-
-        pause_screen
-        return
-    fi
-
     if [ "$(user_exists "$username")" -eq 0 ]; then
-
         echo -e "${RED}User not found.${NC}"
-
         pause_screen
         return
     fi
@@ -596,24 +338,15 @@ delete_user() {
     password=$(get_password "$username")
 
     if ! remove_password "$password"; then
-
         echo -e "${RED}Failed to remove password from ZiVPN.${NC}"
-
         pause_screen
         return
     fi
 
-    safe_username=$(escape_sql "$username")
+    safe_username=$(sql_escape "$username")
 
-    if ! sqlite3 "$DB" \
+    sqlite3 "$DB" \
         "DELETE FROM users WHERE username='$safe_username';"
-    then
-
-        echo -e "${RED}Failed to delete database user.${NC}"
-
-        pause_screen
-        return
-    fi
 
     restart_zivpn >/dev/null 2>&1 || true
 
@@ -623,17 +356,12 @@ delete_user() {
     pause_screen
 }
 
-# ============================================================
-# RENEW USER
-# ============================================================
-
 renew_user() {
 
     header
 
     echo -e "${YELLOW}RENEW USER${NC}"
     echo "------------------------------------------------------------"
-    echo
 
     local username
     local old_expiry
@@ -641,29 +369,20 @@ renew_user() {
     local base
     local option
     local value
+    local multiplier
     local new_expiry
     local safe_username
 
+    echo
     read -r -p "Username: " username
 
-    if [ -z "$username" ]; then
-
-        echo -e "${RED}Username cannot be empty.${NC}"
-
-        pause_screen
-        return
-    fi
-
     if [ "$(user_exists "$username")" -eq 0 ]; then
-
         echo -e "${RED}User not found.${NC}"
-
         pause_screen
         return
     fi
 
     old_expiry=$(get_expiry "$username")
-
     now=$(date +%s)
 
     if [ "$old_expiry" -gt "$now" ]; then
@@ -685,74 +404,41 @@ renew_user() {
     case "$option" in
 
         1)
-
             read -r -p "Hours: " value
-
-            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
-
-                echo -e "${RED}Invalid duration.${NC}"
-
-                pause_screen
-                return
-            fi
-
-            new_expiry=$((base + value * 3600))
-
+            multiplier=3600
             ;;
 
         2)
-
             read -r -p "Days: " value
-
-            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
-
-                echo -e "${RED}Invalid duration.${NC}"
-
-                pause_screen
-                return
-            fi
-
-            new_expiry=$((base + value * 86400))
-
+            multiplier=86400
             ;;
 
         3)
-
             read -r -p "Months: " value
-
-            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
-
-                echo -e "${RED}Invalid duration.${NC}"
-
-                pause_screen
-                return
-            fi
-
-            new_expiry=$((base + value * 2592000))
-
+            multiplier=2592000
             ;;
 
         *)
-
             echo -e "${RED}Invalid selection.${NC}"
-
             pause_screen
             return
             ;;
 
     esac
 
-    safe_username=$(escape_sql "$username")
-
-    if ! sqlite3 "$DB" \
-        "UPDATE users SET expiry='$new_expiry' WHERE username='$safe_username';"
-    then
-
-        echo -e "${RED}Failed to renew user.${NC}"
-
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
+        echo -e "${RED}Invalid duration.${NC}"
         pause_screen
         return
     fi
+
+    new_expiry=$((base + value * multiplier))
+
+    safe_username=$(sql_escape "$username")
+
+    sqlite3 "$DB" \
+        "UPDATE users SET expiry='$new_expiry'
+         WHERE username='$safe_username';"
 
     echo
     echo -e "${GREEN}User renewed successfully.${NC}"
@@ -763,59 +449,53 @@ renew_user() {
     pause_screen
 }
 
-# ============================================================
-# LIST USERS
-# ============================================================
-
 list_users() {
 
     header
 
     echo -e "${GREEN}ACTIVE ZIVPN USERS${NC}"
     echo "------------------------------------------------------------"
-    echo
 
-    local public_ip
+    local ip
     local count
+    local username
+    local password
+    local expiry
 
-    public_ip=$(get_public_ip)
+    ip=$(get_public_ip)
 
     count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM users;")
 
     if [ "$count" -eq 0 ]; then
-
+        echo
         echo -e "${YELLOW}No active users.${NC}"
-
         pause_screen
         return
     fi
 
-    echo "Server IP: $public_ip"
     echo
-
     printf "%-16s %-16s %-20s %-22s\n" \
         "IP ADDRESS" "USERNAME" "PASSWORD" "EXPIRY"
 
     echo "--------------------------------------------------------------------------"
 
-    sqlite3 "$DB" \
-        "SELECT username,password,expiry
-         FROM users
-         ORDER BY expiry ASC;" |
     while IFS='|' read -r username password expiry
     do
 
-        [ -z "$username" ] && continue
-
-        expiry_date=$(date -d "@$expiry" '+%Y-%m-%d %H:%M:%S')
+        [ -n "$username" ] || continue
 
         printf "%-16s %-16s %-20s %-22s\n" \
-            "$public_ip" \
+            "$ip" \
             "$username" \
             "$password" \
-            "$expiry_date"
+            "$(date -d "@$expiry" '+%Y-%m-%d %H:%M:%S')"
 
-    done
+    done < <(
+        sqlite3 "$DB" \
+            "SELECT username,password,expiry
+             FROM users
+             ORDER BY expiry ASC;"
+    )
 
     echo
     echo "Total users: $count"
@@ -823,39 +503,25 @@ list_users() {
     pause_screen
 }
 
-# ============================================================
-# USER INFORMATION
-# ============================================================
-
 user_info() {
 
     header
 
     echo -e "${CYAN}USER INFORMATION${NC}"
     echo "------------------------------------------------------------"
-    echo
 
-    local public_ip
+    local ip
     local username
     local password
     local expiry
 
-    public_ip=$(get_public_ip)
+    ip=$(get_public_ip)
 
+    echo
     read -r -p "Username: " username
 
-    if [ -z "$username" ]; then
-
-        echo -e "${RED}Username cannot be empty.${NC}"
-
-        pause_screen
-        return
-    fi
-
     if [ "$(user_exists "$username")" -eq 0 ]; then
-
         echo -e "${RED}User not found.${NC}"
-
         pause_screen
         return
     fi
@@ -868,7 +534,7 @@ user_info() {
     echo "                     USER DETAILS"
     echo "============================================================"
     echo
-    echo "IP Address : $public_ip"
+    echo "IP Address : $ip"
     echo "Username   : $username"
     echo "Password   : $password"
     echo "Expires    : $(date -d "@$expiry" '+%Y-%m-%d %H:%M:%S')"
@@ -878,35 +544,32 @@ user_info() {
     pause_screen
 }
 
-# ============================================================
-# SEARCH USERS
-# ============================================================
-
 search_user() {
 
     header
 
     echo -e "${CYAN}SEARCH USERS${NC}"
     echo "------------------------------------------------------------"
-    echo
 
-    local public_ip
+    local ip
     local search
     local safe_search
+    local username
+    local password
+    local expiry
 
-    public_ip=$(get_public_ip)
+    ip=$(get_public_ip)
 
+    echo
     read -r -p "Search username: " search
 
     if [ -z "$search" ]; then
-
         echo -e "${RED}Search cannot be empty.${NC}"
-
         pause_screen
         return
     fi
 
-    safe_search=$(escape_sql "$search")
+    safe_search=$(sql_escape "$search")
 
     echo
 
@@ -915,56 +578,178 @@ search_user() {
 
     echo "--------------------------------------------------------------------------"
 
-    sqlite3 "$DB" \
-        "SELECT username,password,expiry
-         FROM users
-         WHERE username LIKE '%$safe_search%'
-         ORDER BY username;" |
     while IFS='|' read -r username password expiry
     do
 
-        [ -z "$username" ] && continue
-
-        expiry_date=$(date -d "@$expiry" '+%Y-%m-%d %H:%M:%S')
+        [ -n "$username" ] || continue
 
         printf "%-16s %-16s %-20s %-22s\n" \
-            "$public_ip" \
+            "$ip" \
             "$username" \
             "$password" \
-            "$expiry_date"
+            "$(date -d "@$expiry" '+%Y-%m-%d %H:%M:%S')"
 
-    done
+    done < <(
+        sqlite3 "$DB" \
+            "SELECT username,password,expiry
+             FROM users
+             WHERE username LIKE '%$safe_search%'
+             ORDER BY username;"
+    )
 
     pause_screen
 }
 
-# ============================================================
-# CHECK EXPIRY
-# ============================================================
-
 check_expiry() {
 
     local now
-    local expired_count=0
+    local username
+    local password
+    local expiry
+    local safe_username
+    local expired=0
 
     now=$(date +%s)
 
     while IFS='|' read -r username password expiry
     do
 
-        [ -z "$username" ] && continue
+        [ -n "$username" ] || continue
 
         if [ "$now" -ge "$expiry" ]; then
 
-            local safe_username
-
-            safe_username=$(escape_sql "$username")
+            safe_username=$(sql_escape "$username")
 
             remove_password "$password" >/dev/null 2>&1 || true
 
             sqlite3 "$DB" \
-                "DELETE FROM users WHERE username='$safe_username';"
+                "DELETE FROM users
+                 WHERE username='$safe_username';"
 
-            expired_count=$((expired_count + 1))
+            expired=$((expired + 1))
 
-  
+        fi
+
+    done < <(
+        sqlite3 "$DB" \
+            "SELECT username,password,expiry FROM users;"
+    )
+
+    if [ "$expired" -gt 0 ]; then
+        systemctl restart zivpn >/dev/null 2>&1 || true
+    fi
+}
+
+backup_database() {
+
+    local directory
+    local file
+
+    directory="/root/zivpn-backups"
+
+    mkdir -p "$directory"
+
+    file="$directory/zivpn_users_$(date '+%Y%m%d_%H%M%S').db"
+
+    if cp "$DB" "$file"; then
+
+        chmod 600 "$file"
+
+        echo
+        echo -e "${GREEN}Database backup created:${NC}"
+        echo
+        echo "$file"
+
+    else
+
+        echo -e "${RED}Failed to create backup.${NC}"
+
+    fi
+
+    pause_screen
+}
+
+menu() {
+
+    while true
+    do
+
+        check_expiry
+
+        header
+
+        echo -e "${GREEN}1.${NC} Add User"
+        echo -e "${GREEN}2.${NC} Delete User"
+        echo -e "${GREEN}3.${NC} Renew User"
+        echo -e "${GREEN}4.${NC} List Users"
+        echo -e "${GREEN}5.${NC} Search User"
+        echo -e "${GREEN}6.${NC} User Information"
+        echo -e "${GREEN}7.${NC} Restart ZiVPN"
+        echo -e "${GREEN}8.${NC} Backup Database"
+        echo -e "${GREEN}9.${NC} Exit"
+
+        echo
+        echo "------------------------------------------------------------"
+        echo
+
+        read -r -p "Select option [1-9]: " choice
+
+        case "$choice" in
+
+            1)
+                add_user
+                ;;
+
+            2)
+                delete_user
+                ;;
+
+            3)
+                renew_user
+                ;;
+
+            4)
+                list_users
+                ;;
+
+            5)
+                search_user
+                ;;
+
+            6)
+                user_info
+                ;;
+
+            7)
+                header
+                restart_zivpn
+                pause_screen
+                ;;
+
+            8)
+                backup_database
+                ;;
+
+            9)
+                clear 2>/dev/null || true
+                echo
+                echo -e "${GREEN}ZiVPN Manager closed.${NC}"
+                echo
+                exit 0
+                ;;
+
+            "")
+                ;;
+
+            *)
+                echo
+                echo -e "${RED}Invalid option. Choose 1-9.${NC}"
+                sleep 1
+                ;;
+
+        esac
+
+    done
+}
+
+menu
