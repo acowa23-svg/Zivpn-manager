@@ -1,516 +1,308 @@
 #!/bin/bash
 
-# ==========================================
-# ZiVPN Manager Auto Installer
-# ==========================================
+# ============================================================
+#                 ZiVPN MANAGER V2
+#                    INSTALLER
+# ============================================================
 
+set -e
+
+# ============================================================
+# GITHUB SETTINGS
+# ============================================================
+
+GITHUB_USER="acowa23-svg"
+REPO="zivpn-manager"
+BRANCH="main"
+
+MANAGER_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${REPO}/${BRANCH}/zivpn-manager.sh"
+
+# ============================================================
+# PATHS
+# ============================================================
+
+MANAGER="/usr/local/lib/zivpn-manager.sh"
+COMMAND="/usr/local/bin/zi"
 
 DB="/root/zivpn_users.db"
 CONFIG="/etc/zivpn/config.json"
-ZI="/usr/local/bin/zi"
 
-
-# ---------- ROOT CHECK ----------
+# ============================================================
+# ROOT CHECK
+# ============================================================
 
 if [ "$EUID" -ne 0 ]; then
-    echo "Please run as root"
+    echo
+    echo "ERROR: This installer must be run as root."
+    echo
+    echo "Run:"
+    echo "sudo bash install.sh"
+    echo
     exit 1
 fi
 
+# ============================================================
+# HEADER
+# ============================================================
 
+echo
+echo "============================================================"
+echo "                 ZiVPN MANAGER V2"
+echo "                    INSTALLER"
+echo "============================================================"
+echo
 
-# ---------- REQUIREMENTS ----------
+# ============================================================
+# PACKAGE INSTALLATION
+# ============================================================
 
-install_packages(){
+echo "[1/5] Updating package lists..."
 
-echo "[+] Installing packages..."
+export DEBIAN_FRONTEND=noninteractive
 
-apt update -y
+apt-get update -y
 
-apt install -y \
-wget \
-curl \
-jq \
-sqlite3
+echo
+echo "[2/5] Installing required packages..."
 
+apt-get install -y \
+    curl \
+    wget \
+    jq \
+    sqlite3
 
-}
+# ============================================================
+# INSTALL / CHECK ZIVPN
+# ============================================================
 
+echo
+echo "[3/5] Checking ZiVPN..."
+echo
 
+if [ -f "$CONFIG" ]; then
 
-# ---------- INSTALL ZIVPN ----------
-
-install_zivpn(){
-
-if [ ! -f "$CONFIG" ]; then
-
-echo "[+] Installing ZiVPN..."
-
-cd /root
-
-
-wget -O zi.sh \
-https://raw.githubusercontent.com/zahidbd2/udp-zivpn/main/zi.sh
-
-
-chmod +x zi.sh
-
-
-bash zi.sh
-
+    echo "ZiVPN configuration found:"
+    echo "$CONFIG"
+    echo
+    echo "Skipping ZiVPN installation."
 
 else
 
-echo "[+] ZiVPN already installed"
+    echo "ZiVPN configuration was not found."
+    echo "Downloading ZiVPN installer..."
+    echo
 
+    cd /root
+
+    if ! wget -q --show-progress \
+        -O /root/zi.sh \
+        https://raw.githubusercontent.com/zahidbd2/udp-zivpn/main/zi.sh
+    then
+
+        echo
+        echo "ERROR: Could not download the ZiVPN installer."
+        echo
+        exit 1
+
+    fi
+
+    chmod +x /root/zi.sh
+
+    echo
+    echo "Starting ZiVPN installer..."
+    echo
+    echo "IMPORTANT: If the ZiVPN installer asks questions,"
+    echo "complete those questions before continuing."
+    echo
+
+    bash /root/zi.sh
 fi
 
-}
+# ============================================================
+# VERIFY ZIVPN CONFIG
+# ============================================================
 
+if [ ! -f "$CONFIG" ]; then
 
+    echo
+    echo "============================================================"
+    echo "ERROR: ZiVPN configuration was not found."
+    echo "============================================================"
+    echo
+    echo "Expected:"
+    echo "$CONFIG"
+    echo
+    echo "The ZiVPN installation may not have completed correctly."
+    echo
 
-# ---------- DATABASE ----------
+    exit 1
+fi
 
-create_db(){
+echo
+echo "ZiVPN configuration verified."
 
-sqlite3 "$DB" <<EOF
+# ============================================================
+# VERIFY JSON
+# ============================================================
 
-CREATE TABLE IF NOT EXISTS users(
+if ! jq empty "$CONFIG" >/dev/null 2>&1; then
 
-id INTEGER PRIMARY KEY AUTOINCREMENT,
+    echo
+    echo "ERROR: $CONFIG is not valid JSON."
+    echo
 
-username TEXT UNIQUE,
+    exit 1
+fi
 
-password TEXT,
+echo "ZiVPN JSON configuration verified."
 
-expiry INTEGER
+# ============================================================
+# DATABASE
+# ============================================================
 
+echo
+echo "[4/5] Creating database..."
+
+if [ ! -f "$DB" ]; then
+
+    sqlite3 "$DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    expiry INTEGER NOT NULL
 );
-
-EOF
-
-}
-
-
-
-# ---------- RESTART ----------
-
-restart_zivpn(){
-
-systemctl restart zivpn 2>/dev/null
-
-}
-
-
-
-# ---------- ADD PASSWORD ----------
-
-add_password(){
-
-PASS="$1"
-
-
-cp "$CONFIG" "$CONFIG.backup"
-
-
-jq \
-".auth.config += [\"$PASS\"]" \
-"$CONFIG" > /tmp/config.json
-
-
-mv /tmp/config.json "$CONFIG"
-
-
-restart_zivpn
-
-}
-
-
-
-# ---------- REMOVE PASSWORD ----------
-
-remove_password(){
-
-PASS="$1"
-
-
-cp "$CONFIG" "$CONFIG.backup"
-
-
-jq \
-".auth.config -= [\"$PASS\"]" \
-"$CONFIG" > /tmp/config.json
-
-
-mv /tmp/config.json "$CONFIG"
-
-
-restart_zivpn
-
-}
-
-
-
-
-# ---------- ADD USER ----------
-
-add_user(){
-
-
-echo "
-=====================
- ADD ZIVPN USER
-=====================
-"
-
-
-read -p "Username: " username
-
-read -p "Password: " password
-
-
-
-echo "
-
-Duration
-
-1) Hours
-2) Days
-3) Months
-
-"
-
-
-read -p "Select: " option
-
-
-
-case $option in
-
-1)
-
-read -p "Hours: " value
-
-expiry=$(( $(date +%s)+value*3600 ))
-
-;;
-
-2)
-
-read -p "Days: " value
-
-expiry=$(( $(date +%s)+value*86400 ))
-
-;;
-
-3)
-
-read -p "Months: " value
-
-expiry=$(( $(date +%s)+value*2592000 ))
-
-;;
-
-*)
-
-echo "Invalid"
-
-return
-
-;;
-
-esac
-
-
-
-sqlite3 "$DB" <<EOF
-
-INSERT INTO users
-
-(username,password,expiry)
-
-VALUES
-
-('$username','$password','$expiry');
-
-EOF
-
-
-
-add_password "$password"
-
-
-
-echo "
-
-=====================
- USER CREATED
-=====================
-
-Username: $username
-
-Password: $password
-
-Expiry:
-$(date -d @$expiry)
-
-=====================
-
-"
-
-
-
-}
-
-
-
-# ---------- DELETE USER ----------
-
-
-delete_user(){
-
-read -p "Username: " username
-
-
-
-password=$(sqlite3 "$DB" \
-"SELECT password FROM users WHERE username='$username';")
-
-
-
-if [ -z "$password" ]; then
-
-echo "User not found"
-
-return
+SQL
+
+else
+
+    sqlite3 "$DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    expiry INTEGER NOT NULL
+);
+SQL
 
 fi
 
+chmod 600 "$DB"
 
+echo "Database ready:"
+echo "$DB"
 
-remove_password "$password"
+# ============================================================
+# DOWNLOAD MANAGER
+# ============================================================
 
+echo
+echo "[5/5] Downloading ZiVPN Manager..."
 
+mkdir -p /usr/local/lib
 
-sqlite3 "$DB" \
-"DELETE FROM users WHERE username='$username';"
+TEMP_MANAGER="/tmp/zivpn-manager.sh"
 
+if ! wget -q \
+    -O "$TEMP_MANAGER" \
+    "$MANAGER_URL"
+then
 
+    echo
+    echo "============================================================"
+    echo "ERROR: Could not download the manager."
+    echo "============================================================"
+    echo
+    echo "URL:"
+    echo "$MANAGER_URL"
+    echo
+    echo "Check that:"
+    echo "1. The GitHub repository exists."
+    echo "2. The repository is public."
+    echo "3. zivpn-manager.sh is in the main branch."
+    echo
 
-echo "Deleted successfully"
+    rm -f "$TEMP_MANAGER"
 
-
-}
-
-
-
-
-# ---------- EXPIRY CHECK ----------
-
-
-expiry_check(){
-
-
-NOW=$(date +%s)
-
-
-
-sqlite3 "$DB" \
-"SELECT username,password,expiry FROM users;" |
-
-while IFS="|" read username password expiry
-
-do
-
-
-if [ "$NOW" -ge "$expiry" ]; then
-
-
-echo "Expired: $username"
-
-
-remove_password "$password"
-
-
-sqlite3 "$DB" \
-"DELETE FROM users WHERE username='$username';"
-
-
+    exit 1
 fi
 
+# Check that downloaded file is not empty
 
-done
+if [ ! -s "$TEMP_MANAGER" ]; then
 
+    echo
+    echo "ERROR: Downloaded manager file is empty."
+    echo
 
-}
+    rm -f "$TEMP_MANAGER"
 
+    exit 1
+fi
 
+# Install manager
 
+mv "$TEMP_MANAGER" "$MANAGER"
 
-# ---------- LIST ----------
+chmod 700 "$MANAGER"
 
+# ============================================================
+# CREATE ZI COMMAND
+# ============================================================
 
-list_users(){
+cat > "$COMMAND" <<'EOF'
+#!/bin/bash
 
-echo "
+exec /usr/local/lib/zivpn-manager.sh "$@"
+EOF
 
-================
- USERS
-================
-"
+chmod 755 "$COMMAND"
 
+# ============================================================
+# FINAL CHECK
+# ============================================================
 
-sqlite3 -column -header "$DB" "
+if [ ! -x "$MANAGER" ]; then
 
-SELECT
+    echo
+    echo "ERROR: Manager installation failed."
+    echo
 
-username,
+    exit 1
+fi
 
-datetime(expiry,'unixepoch') expiry
+if [ ! -x "$COMMAND" ]; then
 
-FROM users;
+    echo
+    echo "ERROR: zi command installation failed."
+    echo
 
-"
+    exit 1
+fi
 
+# ============================================================
+# FINISHED
+# ============================================================
 
-}
-
-
-
-
-# ---------- INSTALL ZI COMMAND ----------
-
-
-install_command(){
-
-
-cp "$0" "$ZI"
-
-
-chmod +x "$ZI"
-
-
-
-echo "
-
-=================================
-
-Installation Complete
-
-Type:
-
-zi
-
-to access ZiVPN Manager
-
-=================================
-
-"
-
-}
-
-
-
-
-# ---------- MENU ----------
-
-
-menu(){
-
-while true
-
-do
-
-
-expiry_check
-
-
-clear
-
-
-echo "
-
-================================
-          ZiVPN MANAGER
-================================
-
-1. Add User
-
-2. Delete User
-
-3. List Users
-
-4. Restart ZiVPN
-
-5. Exit
-
-"
-
-
-
-read -p "Select: " choice
-
-
-
-case $choice in
-
-
-1)
-add_user
-;;
-
-
-2)
-delete_user
-;;
-
-
-3)
-list_users
-;;
-
-
-4)
-restart_zivpn
-;;
-
-
-5)
-exit
-;;
-
-
-*)
-
-echo "Invalid option"
-
-;;
-
-esac
-
-
-
-read -p "Press ENTER..."
-
-
-
-done
-
-
-}
-
-
-
-
-# ---------- START ----------
-
-
-install_packages
-
-install_zivpn
-
-create_db
-
-install_command
-
-menu
+echo
+echo "============================================================"
+echo "             INSTALLATION COMPLETE"
+echo "============================================================"
+echo
+echo "ZiVPN Manager V2 has been installed successfully."
+echo
+echo "Open the manager with:"
+echo
+echo "    zi"
+echo
+echo "Manager:"
+echo "    $MANAGER"
+echo
+echo "Database:"
+echo "    $DB"
+echo
+echo "Configuration:"
+echo "    $CONFIG"
+echo
+echo "============================================================"
+echo
